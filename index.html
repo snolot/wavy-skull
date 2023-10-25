@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Wavy skull</title>
+	<link rel="stylesheet" type="text/css" href="./css/style.css">
+	<style type="text/css">
+		.title{
+			width: 800px;
+		}
+	</style>
+</head>
+<body>
+	<div class="title">wavy skull</div>
+	<div class="subtitle">WebGL Effect<div class="info">Done with three.js</div></div>
+	<script type="module">
+		import * as THREE from './libs/build/three.module.js';
+		import { OrbitControls } from './libs/examples/jsm/controls/OrbitControls.js';
+		import { GLTFLoader } from './libs/examples/jsm/loaders/GLTFLoader.js';
+		import {HDRCubeTextureLoader} from './libs/examples/jsm/loaders/HDRCubeTextureLoader.js';
+		import {SkinnedMeshPositionReader} from './src/SkinnedMeshPositionReader.js';
+
+		const simpleNoise = `
+			float N (vec2 st) { // https://thebookofshaders.com/10/
+			        return fract( sin( dot( st.xy, vec2(12.9898,78.233 ) ) ) *  43758.5453123);
+			}
+
+			float smoothNoise( vec2 ip ){ // https://www.youtube.com/watch?v=zXsWftRdsvU
+			    vec2 lv = fract( ip );
+			    vec2 id = floor( ip );
+			    
+			    lv = lv * lv * ( 3. - 2. * lv );
+			    
+			    float bl = N( id );
+			    float br = N( id + vec2( 1, 0 ));
+			    float b = mix( bl, br, lv.x );
+			    
+			    float tl = N( id + vec2( 0, 1 ));
+			    float tr = N( id + vec2( 1, 1 ));
+			    float t = mix( tl, tr, lv.x );
+			    
+			    return mix( b, t, lv.y );
+			}
+		`;
+
+		const loader = new GLTFLoader();
+		const clock = new THREE.Clock();
+		const tempPosition = new THREE.Vector3();
+		const tempNormal = new THREE.Vector3();
+		const dummy = new THREE.Object3D();
+		const title = document.querySelector('.title');
+		const subtitle = document.querySelector('.subtitle');
+
+		let camera, scene, renderer, model, material, control, mixer, instancedMesh;
+		let COUNT;
+
+		const tex = new THREE.TextureLoader().load('./textures/fur4.jpeg');
+		tex.flipY = false;
+
+		let textureCube;
+		let skm, skinnedMesh;
+
+		const initCubeMap = () => {
+			textureCube = new HDRCubeTextureLoader()
+			.setPath( './textures/' )
+			.load( [ 'irr_posx.hdr', 'irr_negx.hdr', 'irr_posy.hdr', 'irr_negy.hdr', 'irr_posz.hdr', 'irr_negz.hdr' ],
+				( texture ) => {
+					scene.environment = texture;
+					//scene.background = texture;
+				}
+			);
+		};
+
+		const initGeometry = (geom) => {
+			COUNT = geom.attributes.position.count;
+
+			const options = {
+				bladeWidth: 0.05,
+				bladeHeight: 0.1,
+				joints: 5
+			};
+
+			const baseGeom = new THREE.PlaneBufferGeometry(
+		        options.bladeWidth,
+		        options.bladeHeight,
+		        1,
+		        options.joints
+		    ).translate(0, options.bladeHeight / 2, 0)
+			
+			const texture = new THREE.TextureLoader().load('./textures/grass_blade_3.png');
+
+			const uniforms = {
+				time: {
+					type:'f',
+				  	value: 0,
+				},
+				textureMap: {
+					type:'t',
+				  	value: texture,
+				},
+				textureColor: {
+					type:'t',
+				  	value: tex,
+				},
+				viewMatrixInverse: {
+					type: 'm4',
+					value: new THREE.Matrix4()
+				}
+			};
+
+			material = new THREE.ShaderMaterial({
+				vertexShader:`
+				varying vec2 vUv;
+				varying vec3 vNormal;
+				uniform float time;
+				uniform mat4 viewMatrixInverse;
+
+				${simpleNoise}
+
+				void main() {
+
+				    vUv = uv;
+				    vNormal = normalize(mat3(viewMatrixInverse) * normal);
+
+				    float t = time * .5;
+				    
+				    // VERTEX POSITION
+				    
+				    vec4 mvPosition = vec4( position, 1.0 );
+				    #ifdef USE_INSTANCING
+				        mvPosition = instanceMatrix * mvPosition;
+				    #endif
+				    
+				    // DISPLACEMENT
+				    
+				    float noise = smoothNoise(mvPosition.xz * 0.5 + vec2(0., t));
+				    noise = pow(noise * 0.5 + 0.5, 2.) * 1.2;
+				    
+				    // here the displacement is made stronger on the blades tips.
+				    float dispPower = 1. - cos( uv.y * 3.1416 * 0.15 );
+				    
+				    float displacement = noise * ( 0.5 * dispPower );
+				    mvPosition.z += displacement * vNormal.z * 3. * noise;
+				    //mvPosition.xyz *= vNormal;
+				    
+				    vec4 modelViewPosition = modelViewMatrix * mvPosition;
+				    gl_Position = projectionMatrix * modelViewPosition;
+
+				}
+				`,
+				fragmentShader:`
+				varying vec2 vUv;
+				varying vec3 vNormal;
+				uniform sampler2D textureMap;
+				uniform sampler2D textureColor;
+
+				void main() {
+
+				    float alpha = texture2D(textureMap, vUv).r;
+				    //If transparent, don't draw
+				    if (alpha < 0.15) discard;
+				    
+				    vec3 baseColor = texture2D(textureColor, vUv).rgb;//vec3( 0.5, 0.0, 0.0 );
+				    float clarity = ( vUv.y * 0.875 ) + 0.125;
+				    gl_FragColor = vec4( baseColor * clarity, 1 );
+				}
+				`,
+				uniforms,
+				side: THREE.DoubleSide,
+				blending:THREE.NormalBlending
+			});
+
+			console.log(material);
+
+		    instancedMesh = new THREE.InstancedMesh(
+		      	baseGeom,
+		      	material,
+		      	COUNT
+		    );
+
+		    
+		    const pa = geom.attributes.position.array;
+		    const na = geom.attributes.normal.array;
+
+		    for (let i = 0; i < COUNT; i++) {
+		        
+		        const index = i * 3;
+		        tempPosition.set(pa[index + 0], pa[index + 1], pa[index + 2]);
+		        tempNormal.set(na[index + 0], na[index + 1], na[index + 2]);
+
+		        dummy.position.set(tempPosition.x, tempPosition.y, tempPosition.z);
+		       	///dummy.lookAt(tempNormal.multiply(new THREE.Vector3(0,-2,0)) );
+		       	tempNormal.add(new THREE.Vector3(0,-2,0))
+		       	tempNormal.normalize();
+		       	dummy.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tempNormal.multiplyScalar(.5));
+		        dummy.updateMatrix();
+		        //if (tempPosition.y >= 0.0) {
+		        instancedMesh.setMatrixAt(i, dummy.matrix);
+		        //}
+		    }
+
+		    //instancedMesh.rotateX(Math.PI * .5);
+
+		    // instancedMesh.scale.set(1.02, 1.02, 1.02);
+
+		    scene.add(instancedMesh);
+			console.log(COUNT);
+		};
+
+		const initModel = () => {
+			return new Promise((resolve) => {
+				loader.load('./models/skull.glb', (gltf) => {
+					model = gltf.scene;
+					console.log(model);
+
+					model.traverse((child) => {
+						if(child.isMesh){
+							initGeometry(child.geometry);
+							skinnedMesh = child;
+							
+							
+							
+							//child.material.transparent = true;
+							//child.material.opacity = 0.0;
+							child.material.emissiveMap = tex;
+							
+						}
+					});
+
+					scene.add(model);
+					model.visible = false
+					camera.lookAt(scene.position);
+
+					resolve(true);
+				});
+			});
+		};
+
+		const initLights = () => {
+			const lightMesh = new THREE.Object3D();
+			lightMesh.position.set( 0, 50, 0 );
+
+			const light = new THREE.HemisphereLight( 0x88ffff, 0xFF0088, 0.5 );
+			scene.add( light );
+
+			const ambient = new THREE.AmbientLight( 0x333333, 1.6 );
+			lightMesh.add( ambient );
+
+		    const blue = new THREE.SpotLight( 0x0066FF, 2, 500 );
+		    blue.castShadow = true;
+		    blue.position.set( -50, 50, -50 );
+		    blue.shadow.mapSize.width = 512;
+		    blue.shadow.mapSize.height = 512;
+		    blue.shadow.camera.near = 0.5;
+		    lightMesh.add( blue );
+				
+			const yellow = new THREE.SpotLight( 0xFFCC00, 1.5, 500 );
+		    yellow.castShadow = true;
+		    yellow.position.set( 50, 50, 0 );
+		    yellow.shadow.mapSize.width = 512;
+		    yellow.shadow.mapSize.height = 512;
+		    yellow.shadow.camera.near = 0.5;
+		    lightMesh.add( yellow );
+
+
+			scene.add(lightMesh);
+		};
+
+		const init = async() => {
+			camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 1000);
+			scene = new THREE.Scene();
+			camera.position.set(3,3,3);
+			renderer = new THREE.WebGLRenderer({alpha:false});
+			renderer.setPixelRatio(window.devicePixelRatio);
+    		//renderer.toneMapping = THREE.ReinhardToneMapping;
+    		//renderer.toneMapping = THREE.ACESFilmicToneMapping;
+			//renderer.outputEncoding = THREE.sRGBEncoding;
+    		renderer.shadowMap.enabled = true;
+			document.body.appendChild(renderer.domElement);
+			renderer.setClearColor ( new THREE.Color(0,0,0), 1.0 ) 
+			renderer.setSize(innerWidth, innerHeight);
+
+			control = new OrbitControls(camera, renderer.domElement);
+			initLights();
+
+			await initModel();
+			initCubeMap();
+
+			//skm = SkinnedMeshPositionReader(scene);
+			//skm.init(skinnedMesh);
+
+			console.log('- START -');
+			title.classList.add('show')
+			subtitle.classList.add('show')
+			update();
+		};
+
+		let idx = 0;
+
+		const update = () => {
+			requestAnimationFrame(update);
+
+			const delta = clock.getDelta();
+			
+			material.uniforms.time.value += delta;
+			material.uniforms.viewMatrixInverse.value.copy(camera.matrixWorld);
+
+			/*const pa = skm.getOriginalPositions();
+			
+			//const pa = geom.attributes.position.array;
+		    const na = skinnedMesh.geometry.attributes.normal.array;
+
+			for (let i = 0; i < COUNT; i++) {
+		        
+		        const index = i * 3;
+		        //tempPosition.set(pa[i].x, pa[i].y, pa[i].z);
+		        tempNormal.set(na[index + 0], na[index + 1], pa[index + 2]);
+		        
+
+		        dummy.position.set(pa[i].x, pa[i].y, pa[i].z);
+		       	//dummy.lookAt( new THREE.Vector3(0,-2,0) );
+		        dummy.updateMatrix();
+		        //if (tempPosition.y >= 0.0) {
+		        instancedMesh.setMatrixAt(i, dummy.matrix);
+		        //}
+		    }
+
+		    instancedMesh.instanceMatrix.needsUpdate = true;*/
+
+			if(mixer){
+				mixer.update(delta);
+			}
+
+			renderer.render(scene, camera);
+		};
+
+		init();
+	</script>
+</body>
+</html>
